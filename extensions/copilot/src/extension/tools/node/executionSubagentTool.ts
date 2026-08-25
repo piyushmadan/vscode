@@ -17,6 +17,7 @@ import { IInstantiationService } from '../../../util/vs/platform/instantiation/c
 import { ChatResponseNotebookEditPart, ChatResponseTextEditPart, ChatToolInvocationPart, ExtendedLanguageModelToolResult, LanguageModelTextPart, MarkdownString } from '../../../vscodeTypes';
 import { Conversation, Turn } from '../../prompt/common/conversation';
 import { IBuildPromptContext } from '../../prompt/common/intents';
+import { isExecutionSubagentTurnWarningExperimentEnabled } from '../../prompt/node/executionSubagentEvaluation';
 import { ExecutionSubagentToolCallingLoop, IBackgroundCommand } from '../../prompt/node/executionSubagentToolCallingLoop';
 import { ToolName } from '../common/toolNames';
 import { CopilotToolMode, ICopilotTool, ToolRegistry } from '../common/toolsRegistry';
@@ -76,6 +77,7 @@ class ExecutionSubagentTool implements ICopilotTool<IExecutionSubagentParams> {
 			parentHeaderRequestId: this._inputContext?.parentHeaderRequestId,
 			parentModelCallId: this._inputContext?.parentModelCallId,
 			topLevelTurnId: this._inputContext?.requestId,
+			strictModelResolution: isExecutionSubagentTurnWarningExperimentEnabled(),
 		});
 
 		const stream = this._inputContext?.stream && ChatResponseStreamImpl.filter(

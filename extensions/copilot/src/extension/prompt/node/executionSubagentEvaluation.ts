@@ -20,6 +20,11 @@ export function getExecutionSubagentTurnWarningMode(environment: Readonly<Record
 	return environment[EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE] === 'every' ? 'every' : 'last';
 }
 
+export function isExecutionSubagentTurnWarningExperimentEnabled(environment: Readonly<Record<string, string | undefined>> = process.env): boolean {
+	const mode = environment[EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE];
+	return mode === 'last' || mode === 'every';
+}
+
 export function getExecutionSubagentTurnWarning(maxTurns: number, completedTurns: number, mode: ExecutionSubagentTurnWarningMode): string | undefined {
 	const remainingTurns = Math.max(maxTurns - completedTurns, 1);
 	if (mode === 'every') {

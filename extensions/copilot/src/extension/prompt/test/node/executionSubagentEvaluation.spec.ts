@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, it } from 'vitest';
-import { createExecutionSubagentEvaluationConversation, EXECUTION_SUBAGENT_EVALUATION_ENVIRONMENT_VARIABLE, EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE, getExecutionSubagentInstruction, getExecutionSubagentTurnWarning, getExecutionSubagentTurnWarningMode, isExecutionSubagentEvaluationEnabled } from '../../node/executionSubagentEvaluation';
+import { createExecutionSubagentEvaluationConversation, EXECUTION_SUBAGENT_EVALUATION_ENVIRONMENT_VARIABLE, EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE, getExecutionSubagentInstruction, getExecutionSubagentTurnWarning, getExecutionSubagentTurnWarningMode, isExecutionSubagentEvaluationEnabled, isExecutionSubagentTurnWarningExperimentEnabled } from '../../node/executionSubagentEvaluation';
 
 describe('Execution subagent evaluation mode', () => {
 	it('is enabled only by the explicit value 1', () => {
@@ -76,6 +76,26 @@ describe('Execution subagent evaluation mode', () => {
 			first: 'You have 10 of 10 allotted iterations remaining. When one iteration remains, do not call tools; return only the <final_answer>.',
 			second: 'You have 9 of 10 allotted iterations remaining. When one iteration remains, do not call tools; return only the <final_answer>.',
 			final: 'You have 1 of 10 allotted iterations remaining. When one iteration remains, do not call tools; return only the <final_answer>.',
+		});
+	});
+
+	it('enables strict model resolution only for explicit treatment modes', () => {
+		expect({
+			last: isExecutionSubagentTurnWarningExperimentEnabled({
+				[EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE]: 'last',
+			}),
+			every: isExecutionSubagentTurnWarningExperimentEnabled({
+				[EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE]: 'every',
+			}),
+			unset: isExecutionSubagentTurnWarningExperimentEnabled({}),
+			invalid: isExecutionSubagentTurnWarningExperimentEnabled({
+				[EXECUTION_SUBAGENT_TURN_WARNING_MODE_ENVIRONMENT_VARIABLE]: 'always',
+			}),
+		}).toEqual({
+			last: true,
+			every: true,
+			unset: false,
+			invalid: false,
 		});
 	});
 });
