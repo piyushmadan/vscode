@@ -31,6 +31,7 @@ import { ToolName } from '../../tools/common/toolNames';
 import { IToolsService } from '../../tools/common/toolsService';
 import { IBuildPromptContext } from '../common/intents';
 import { IBuildPromptResult } from './intents';
+import { getExecutionSubagentTurnWarningMode } from './executionSubagentEvaluation';
 
 export interface IExecutionSubagentToolCallingLoopOptions extends IToolCallingLoopOptions {
 	request: ChatRequest;
@@ -46,6 +47,8 @@ export interface IExecutionSubagentToolCallingLoopOptions extends IToolCallingLo
 	parentModelCallId?: string;
 	/** The top-level turn ID for aggregating credits across subagent calls. */
 	topLevelTurnId?: string;
+	/** Fail instead of falling back to the parent endpoint when an explicitly configured model cannot be resolved. */
+	strictModelResolution?: boolean;
 }
 
 /** A terminal command that is no longer being awaited by the subagent — either
@@ -59,7 +62,7 @@ export interface IBackgroundCommand {
 	readonly timeoutMs?: number;
 }
 
-export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecutionSubagentToolCallingLoopOptions> {
+export class ExecutionSubagentToolCallingLoop<TOptions extends IExecutionSubagentToolCallingLoopOptions = IExecutionSubagentToolCallingLoopOptions> extends ToolCallingLoop<TOptions> {
 
 	public static readonly ID = 'executionSubagentTool';
 
@@ -75,7 +78,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 	}
 
 	constructor(
-		options: IExecutionSubagentToolCallingLoopOptions,
+		options: TOptions,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService logService: ILogService,
 		@IRequestLogger requestLogger: IRequestLogger,
@@ -114,7 +117,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 	/**
 	 * Get the endpoint to use for the execution subagent
 	 */
-	private getEndpoint(): Promise<IChatEndpoint> {
+	protected getEndpoint(): Promise<IChatEndpoint> {
 		return this._endpoint ??= this.resolveEndpoint();
 	}
 
@@ -150,13 +153,22 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 				if (endpoint.supportsToolCalls) {
 					return endpoint;
 				}
+				if (this.options.strictModelResolution) {
+					throw new Error(`Execution subagent model "${modelName}" does not support tool calls.`);
+				}
 				// Model does not support tool calls, fallback to main agent endpoint
 				return await this.endpointProvider.getChatEndpoint(this.options.request);
 			} catch (error) {
+				if (this.options.strictModelResolution) {
+					throw error;
+				}
 				// Model not available, fallback to main agent endpoint
 				return await this.endpointProvider.getChatEndpoint(this.options.request);
 			}
 		} else {
+			if (this.options.strictModelResolution) {
+				throw new Error('Execution subagent evaluation requires an explicit model.');
+			}
 			// No model name specified, use main agent endpoint
 			return await this.endpointProvider.getChatEndpoint(this.options.request);
 		}
@@ -164,7 +176,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 
 	protected async buildPrompt(buildpromptContext: IBuildPromptContext, progress: Progress<ChatResponseReferencePart | ChatResponseProgressPart>, token: CancellationToken): Promise<IBuildPromptResult> {
 		const endpoint = await this.getEndpoint();
-		const maxExecutionTurns = this._configurationService.getExperimentBasedConfig(ConfigKey.Advanced.ExecutionSubagentToolCallLimit, this._experimentationService);
+		const maxExecutionTurns = this.options.toolCallLimit;
 
 		const render = (hasBackgroundCommand: boolean) => PromptRenderer.create(
 			this.instantiationService,
@@ -173,6 +185,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 			{
 				promptContext: buildpromptContext,
 				maxExecutionTurns,
+				turnWarningMode: getExecutionSubagentTurnWarningMode(),
 				hasBackgroundCommand,
 			}
 		).render(progress, token);

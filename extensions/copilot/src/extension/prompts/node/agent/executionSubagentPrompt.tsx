@@ -5,6 +5,7 @@
 
 import { PromptElement, PromptSizing, SystemMessage, UserMessage } from '@vscode/prompt-tsx';
 import { GenericBasePromptElementProps } from '../../../context/node/resolvers/genericPanelIntentInvocation';
+import { getExecutionSubagentTurnWarning, type ExecutionSubagentTurnWarningMode } from '../../../prompt/node/executionSubagentEvaluation';
 import { ToolName } from '../../../tools/common/toolNames';
 import { CopilotToolMode } from '../../../tools/common/toolsRegistry';
 import { SafetyRules } from '../base/safetyRules';
@@ -13,6 +14,7 @@ import { ChatToolCalls } from '../panel/toolCalling';
 
 export interface ExecutionSubagentPromptProps extends GenericBasePromptElementProps {
 	readonly maxExecutionTurns: number;
+	readonly turnWarningMode: ExecutionSubagentTurnWarningMode;
 	/** True if a previous {@link ToolName.CoreRunInTerminal} call timed out or was
 	 * invoked in async/background mode; the model is told to stop calling tools
 	 * and emit its `<final_answer>`. */
@@ -33,6 +35,7 @@ export class ExecutionSubagentPrompt extends PromptElement<ExecutionSubagentProm
 		// Check if we're at the last turn (to align with training where we coax final answer)
 		const currentTurn = toolCallRounds?.length ?? 0;
 		const isLastTurn = currentTurn >= this.props.maxExecutionTurns - 1;
+		const turnWarning = getExecutionSubagentTurnWarning(this.props.maxExecutionTurns, currentTurn, this.props.turnWarningMode);
 
 		return (
 			<>
@@ -82,9 +85,9 @@ export class ExecutionSubagentPrompt extends PromptElement<ExecutionSubagentProm
 					toolCallResults={toolCallResults}
 					toolCallMode={CopilotToolMode.FullContext}
 				/>
-				{isLastTurn && (
+				{turnWarning && (
 					<UserMessage priority={900}>
-						OK, your allotted iterations are finished. Show the &lt;final_answer&gt;.
+						{turnWarning}
 					</UserMessage>
 				)}
 				{!isLastTurn && this.props.hasBackgroundCommand && (

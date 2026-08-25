@@ -52,6 +52,7 @@ import { getRequestedToolCallIterationLimit, IContinueOnErrorConfirmation } from
 import { ChatTelemetryBuilder } from '../../prompt/node/chatParticipantTelemetry';
 import { IDefaultIntentRequestHandlerOptions } from '../../prompt/node/defaultIntentRequestHandler';
 import { IDocumentContext } from '../../prompt/node/documentContext';
+import { EXECUTION_SUBAGENT_EVALUATION_TOOL_CALL_LIMIT, isExecutionSubagentEvaluationEnabled } from '../../prompt/node/executionSubagentEvaluation';
 import { IBuildPromptResult, IIntent, IIntentInvocation } from '../../prompt/node/intents';
 import { AgentPrompt, AgentPromptProps } from '../../prompts/node/agent/agentPrompt';
 import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, IBackgroundSummarizationResult, resolveSummaryAnchorRoundId, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
@@ -190,6 +191,37 @@ export function resolveSummarizeThresholdTokens(value: number | undefined, effec
 	}
 	// Absolute token count.
 	return value;
+}
+
+/**
+ * Computes request-handler options for top-level Agent turns.
+ *
+ * @internal - exported for testing
+ */
+export function getAgentIntentRequestHandlerOptions(
+	request: vscode.ChatRequest,
+	maxToolCallIterations: number,
+	temperature: number,
+	environment: Readonly<Record<string, string | undefined>> = process.env,
+): IDefaultIntentRequestHandlerOptions {
+	const executionSubagentEvaluation = isExecutionSubagentEvaluationEnabled(environment)
+		&& request.subAgentInvocationId === undefined
+		&& request.subAgentName === undefined;
+
+	if (executionSubagentEvaluation) {
+		return {
+			maxToolCallIterations: EXECUTION_SUBAGENT_EVALUATION_TOOL_CALL_LIMIT,
+			temperature,
+			overrideRequestLocation: ChatLocation.Agent,
+			executionSubagentEvaluation: true,
+		};
+	}
+
+	return {
+		maxToolCallIterations,
+		temperature,
+		overrideRequestLocation: ChatLocation.Agent,
+	};
 }
 
 export const getAgentTools = async (accessor: ServicesAccessor, request: vscode.ChatRequest, model?: IChatEndpoint) => {
@@ -427,12 +459,11 @@ export class AgentIntent extends EditCodeIntent {
 	}
 
 	protected override getIntentHandlerOptions(request: vscode.ChatRequest): IDefaultIntentRequestHandlerOptions | undefined {
-		return {
-			maxToolCallIterations: getRequestedToolCallIterationLimit(request) ??
-				this.instantiationService.invokeFunction(getAgentMaxRequests),
-			temperature: this.configurationService.getConfig(ConfigKey.Advanced.AgentTemperature) ?? 0,
-			overrideRequestLocation: ChatLocation.Agent
-		};
+		return getAgentIntentRequestHandlerOptions(
+			request,
+			getRequestedToolCallIterationLimit(request) ?? this.instantiationService.invokeFunction(getAgentMaxRequests),
+			this.configurationService.getConfig(ConfigKey.Advanced.AgentTemperature) ?? 0,
+		);
 	}
 
 	override async handleRequest(

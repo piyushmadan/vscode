@@ -70,6 +70,7 @@ describe('ExecutionSubagentToolCallingLoop.getEndpoint (non-proxy resolution)', 
 		allEndpoints?: IChatEndpoint[];
 		familyEndpoint?: IChatEndpoint;
 		familyThrows?: boolean;
+		strictModelResolution?: boolean;
 	}): { loop: ExecutionSubagentToolCallingLoop; probe: IEndpointProviderProbe } {
 		const loopOptions: IExecutionSubagentToolCallingLoopOptions = {
 			conversation: null!,
@@ -77,6 +78,7 @@ describe('ExecutionSubagentToolCallingLoop.getEndpoint (non-proxy resolution)', 
 			request: createMockChatRequest(),
 			location: ChatLocation.Panel,
 			promptText: 'run things',
+			strictModelResolution: options.strictModelResolution,
 		};
 		const loop = instantiationService.createInstance(ExecutionSubagentToolCallingLoop, loopOptions);
 		disposables.add(loop);
@@ -195,5 +197,27 @@ describe('ExecutionSubagentToolCallingLoop.getEndpoint (non-proxy resolution)', 
 		expect(probe.getAllCalls).toBe(0);
 		expect(probe.familyCalls).toEqual([]);
 		expect(probe.mainCalls).toBe(1);
+	});
+
+	it('fails closed when the configured evaluation model cannot be resolved', async () => {
+		await configurationService.setConfig(ConfigKey.Advanced.ExecutionSubagentUseAgenticProxy, false);
+		await configurationService.setConfig(ConfigKey.Advanced.ExecutionSubagentModel, 'does-not-exist');
+		const { loop, probe } = createLoop({
+			allEndpoints: [],
+			familyThrows: true,
+			strictModelResolution: true,
+		});
+
+		await expect(loop.getModelName()).rejects.toThrow('Unable to resolve chat model with CAPI family selection: does-not-exist');
+		expect(probe.mainCalls).toBe(0);
+	});
+
+	it('requires an explicit model for direct evaluation', async () => {
+		await configurationService.setConfig(ConfigKey.Advanced.ExecutionSubagentUseAgenticProxy, false);
+		await configurationService.setConfig(ConfigKey.Advanced.ExecutionSubagentModel, '');
+		const { loop, probe } = createLoop({ strictModelResolution: true });
+
+		await expect(loop.getModelName()).rejects.toThrow('Execution subagent evaluation requires an explicit model.');
+		expect(probe.mainCalls).toBe(0);
 	});
 });

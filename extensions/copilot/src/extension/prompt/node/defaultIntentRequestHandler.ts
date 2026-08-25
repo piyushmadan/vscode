@@ -27,6 +27,7 @@ import { IOTelService } from '../../../platform/otel/common/otelService';
 import { CapturingToken } from '../../../platform/requestLogger/common/capturingToken';
 import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { ISurveyService } from '../../../platform/survey/common/surveyService';
+import { ITerminalService } from '../../../platform/terminal/common/terminalService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { ChatResponseStreamImpl } from '../../../util/common/chatResponseStreamImpl';
@@ -48,7 +49,7 @@ import { UnknownIntent } from '../../intents/node/unknownIntent';
 import { ResponseStreamWithLinkification } from '../../linkify/common/responseStreamWithLinkification';
 import { SummarizedConversationHistoryMetadata } from '../../prompts/node/agent/summarizedConversationHistory';
 import { normalizeToolSchema } from '../../tools/common/toolSchemaNormalizer';
-import { ToolCallCancelledError } from '../../tools/common/toolsService';
+import { IToolsService, ToolCallCancelledError } from '../../tools/common/toolsService';
 import { IToolGrouping, IToolGroupingService } from '../../tools/common/virtualTools/virtualToolTypes';
 import { ChatVariablesCollection } from '../common/chatVariablesCollection';
 import { Conversation, getUniqueReferences, GlobalContextMessageMetadata, IResultMetadata, RenderedUserMessageMetadata, RequestDebugInformation, ResponseStreamParticipant, Turn, TurnStatus, TurnTokenUsageMetadata } from '../common/conversation';
@@ -57,6 +58,8 @@ import { isToolCallLimitCancellation, ISwitchToAutoOnRateLimitConfirmation } fro
 import { ChatTelemetry, ChatTelemetryBuilder } from './chatParticipantTelemetry';
 import { IntentInvocationMetadata } from './conversation';
 import { IDocumentContext } from './documentContext';
+import { createExecutionSubagentEvaluationConversation } from './executionSubagentEvaluation';
+import { ExecutionSubagentToolCallingLoop, type IExecutionSubagentToolCallingLoopOptions } from './executionSubagentToolCallingLoop';
 import { IBuildPromptResult, IIntent, IIntentInvocation, IResponseProcessor, TelemetryData } from './intents';
 import { ConversationalBaseTelemetryData, createTelemetryWithId, getModeNameForTelemetry, sendModelMessageTelemetry } from './telemetry';
 
@@ -69,6 +72,7 @@ export interface IDefaultIntentRequestHandlerOptions {
 	confirmOnMaxToolIterations?: boolean;
 	temperature?: number;
 	overrideRequestLocation?: ChatLocation;
+	executionSubagentEvaluation?: boolean;
 }
 
 /*
@@ -79,7 +83,7 @@ export class DefaultIntentRequestHandler {
 	private readonly turn: Turn;
 
 	private _editSurvivalTracker: IEditSurvivalTrackingSession = new NullEditSurvivalTrackingSession();
-	private _loop!: DefaultToolCallingLoop;
+	private _loop!: ITelemetryToolCallingLoop;
 
 	constructor(
 		private readonly intent: IIntent,
@@ -323,28 +327,48 @@ export class DefaultIntentRequestHandler {
 
 	private async runWithToolCalling(intentInvocation: IIntentInvocation): Promise<IInternalRequestResult> {
 		const store = new DisposableStore();
-		const loop = this._loop = store.add(this._instantiationService.createInstance(
-			DefaultToolCallingLoop,
-			{
-				conversation: this.conversation,
-				intent: this.intent,
-				invocation: intentInvocation,
-				toolCallLimit: this.handlerOptions.maxToolCallIterations,
-				onHitToolCallLimit: this.handlerOptions.confirmOnMaxToolIterations !== false
-					? ToolCallLimitBehavior.Confirm : ToolCallLimitBehavior.Stop,
-				request: this.request,
-				enableVoiceProgress: this.intent.id === Intent.Agent,
-				documentContext: this.documentContext,
-				streamParticipants: this.makeResponseStreamParticipants(intentInvocation),
-				temperature: this.handlerOptions.temperature ?? this.options.temperature,
-				location: this.location,
-				overrideRequestLocation: this.handlerOptions.overrideRequestLocation,
-				interactionContext: this.documentContext?.document.uri,
-				responseProcessor: typeof intentInvocation.processResponse === 'function' ? intentInvocation as IResponseProcessor : undefined,
-				yieldRequested: this.yieldRequested,
-			},
-			this.chatTelemetryBuilder,
-		));
+		const loop = this._loop = store.add(this.handlerOptions.executionSubagentEvaluation
+			? this._instantiationService.createInstance(
+				ExecutionSubagentEvaluationToolCallingLoop,
+				{
+					// Keep a dedicated single-turn execution conversation here. The
+					// prompt reads turns[0], and direct eval mode must preserve the
+					// raw <final_answer> block so graders can score it and any
+					// forbidden async/background behavior remains visible.
+					conversation: createExecutionSubagentEvaluationConversation(this.conversation.sessionId, this.request.prompt),
+					intent: this.intent,
+					toolCallLimit: this.handlerOptions.maxToolCallIterations,
+					request: this.request,
+					location: this.handlerOptions.overrideRequestLocation ?? this.location,
+					promptText: this.request.prompt,
+					subAgentInvocationId: this.request.id,
+					topLevelTurnId: this.request.id,
+					strictModelResolution: true,
+				},
+				this.chatTelemetryBuilder,
+			)
+			: this._instantiationService.createInstance(
+				DefaultToolCallingLoop,
+				{
+					conversation: this.conversation,
+					intent: this.intent,
+					invocation: intentInvocation,
+					toolCallLimit: this.handlerOptions.maxToolCallIterations,
+					onHitToolCallLimit: this.handlerOptions.confirmOnMaxToolIterations !== false
+						? ToolCallLimitBehavior.Confirm : ToolCallLimitBehavior.Stop,
+					request: this.request,
+					enableVoiceProgress: this.intent.id === Intent.Agent,
+					documentContext: this.documentContext,
+					streamParticipants: this.makeResponseStreamParticipants(intentInvocation),
+					temperature: this.handlerOptions.temperature ?? this.options.temperature,
+					location: this.location,
+					overrideRequestLocation: this.handlerOptions.overrideRequestLocation,
+					interactionContext: this.documentContext?.document.uri,
+					responseProcessor: typeof intentInvocation.processResponse === 'function' ? intentInvocation as IResponseProcessor : undefined,
+					yieldRequested: this.yieldRequested,
+				},
+				this.chatTelemetryBuilder,
+			));
 
 		store.add(Event.once(loop.onDidBuildPrompt)(this._sendInitialChatReferences, this));
 
@@ -609,6 +633,81 @@ interface IDefaultToolLoopOptions extends IToolCallingLoopOptions {
 	location: ChatLocation;
 	temperature: number;
 	overrideRequestLocation?: ChatLocation;
+}
+
+interface IExecutionSubagentEvaluationLoopOptions extends IExecutionSubagentToolCallingLoopOptions {
+	intent: IIntent;
+	subAgentInvocationId: string;
+	topLevelTurnId: string;
+}
+
+interface ITelemetryToolCallingLoop extends ToolCallingLoop {
+	telemetry: ChatTelemetry;
+}
+
+class ExecutionSubagentEvaluationToolCallingLoop extends ExecutionSubagentToolCallingLoop<IExecutionSubagentEvaluationLoopOptions> implements ITelemetryToolCallingLoop {
+	public telemetry!: ChatTelemetry;
+
+	constructor(
+		options: IExecutionSubagentEvaluationLoopOptions,
+		private readonly telemetryBuilder: ChatTelemetryBuilder,
+		@IInstantiationService instantiationService: IInstantiationService,
+		@ILogService logService: ILogService,
+		@IRequestLogger requestLogger: IRequestLogger,
+		@IEndpointProvider endpointProvider: IEndpointProvider,
+		@IToolsService toolsService: IToolsService,
+		@IAuthenticationChatUpgradeService authenticationChatUpgradeService: IAuthenticationChatUpgradeService,
+		@ITelemetryService telemetryService: ITelemetryService,
+		@IConfigurationService configurationService: IConfigurationService,
+		@IExperimentationService experimentationService: IExperimentationService,
+		@IChatHookService chatHookService: IChatHookService,
+		@ISessionTranscriptService sessionTranscriptService: ISessionTranscriptService,
+		@IFileSystemService fileSystemService: IFileSystemService,
+		@IOTelService otelService: IOTelService,
+		@IGitService gitService: IGitService,
+		@ITerminalService terminalService: ITerminalService,
+	) {
+		super(options, instantiationService, logService, requestLogger, endpointProvider, toolsService, authenticationChatUpgradeService, telemetryService, configurationService, experimentationService, chatHookService, sessionTranscriptService, fileSystemService, otelService, gitService, terminalService);
+	}
+
+	protected override async buildPrompt(buildPromptContext: IBuildPromptContext, progress: Progress<ChatResponseReferencePart | ChatResponseProgressPart>, token: CancellationToken): Promise<IBuildPromptResult> {
+		const buildPromptResult = await super.buildPrompt(buildPromptContext, progress, token);
+		const endpoint = await this.getEndpoint();
+		const availableTools = buildPromptContext.tools?.availableTools ?? [];
+		const tokenizer = await endpoint.acquireTokenizer();
+		const promptTokenLength = await tokenizer.countMessagesTokens(buildPromptResult.messages);
+		const toolTokenCount = availableTools.length > 0 ? await tokenizer.countToolTokens(availableTools) : 0;
+
+		this.telemetry = this.telemetryBuilder.makeRequest(
+			this.options.intent,
+			this.options.location,
+			this.options.conversation,
+			buildPromptResult.messages,
+			promptTokenLength,
+			buildPromptResult.references,
+			endpoint,
+			buildPromptResult.metadata.getAll(TelemetryData) ?? [],
+			availableTools.length,
+			toolTokenCount,
+		);
+
+		return buildPromptResult;
+	}
+
+	protected override fetch(opts: ToolCallingLoopFetchOptions, token: CancellationToken): Promise<ChatResponse> {
+		const finishedCb = opts.finishedCb;
+		if (!finishedCb) {
+			throw new Error('ExecutionSubagentEvaluationToolCallingLoop requires a finished callback.');
+		}
+
+		return super.fetch({
+			...opts,
+			finishedCb: (text, index, delta) => {
+				this.telemetry.markReceivedToken();
+				return finishedCb(text, index, delta);
+			},
+		}, token);
+	}
 }
 
 class DefaultToolCallingLoop extends ToolCallingLoop<IDefaultToolLoopOptions> {
